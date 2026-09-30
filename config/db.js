@@ -4,10 +4,7 @@ const mongoose = require("mongoose"); // Import Mongoose for MongoDB connection
 const connectDB = async () => {
   try {
     // Attempt to connect to MongoDB using the provided connection string from environment variables
-    await mongoose.connect(process.env.MONGO_URL, {
-      useNewUrlParser: true, // Ensures compatibility with the latest MongoDB drivers
-      useUnifiedTopology: true, // Enables the new connection management engine
-    });
+    await mongoose.connect(process.env.MONGO_URL);
 
     console.log("MongoDB Connected"); // Log a success message when connected
   } catch (err) {

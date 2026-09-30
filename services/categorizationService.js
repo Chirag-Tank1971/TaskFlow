@@ -1,5 +1,8 @@
-const { GoogleGenAI } = require("@google/genai");
 const crypto = require("crypto");
+const { getGeminiClient, PRIMARY_MODEL, getModelStatus } = require("./geminiClient");
+// All Gemini calls go through geminiGenerate: shared rate limit, retries, per-model quota fallback
+const { generateContent, AiBusyError } = require("./geminiGenerate");
+const { generationLimiter } = require("./geminiRateLimiter");
 
 // Category definitions
 const CATEGORIES = ["Support", "Sales", "Technical", "Billing", "Urgent", "General"];
@@ -9,17 +12,8 @@ const CATEGORIES = ["Support", "Sales", "Technical", "Billing", "Urgent", "Gener
 const categorizationCache = new Map();
 const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
 
-// Rate limiting configuration
-let requestCount = 0;
-let rateLimitResetTime = Date.now() + 60000; // Reset every minute
-const MAX_REQUESTS_PER_MINUTE = 5; // Gemini free tier limit (5 requests/minute)
-
-// Model discovery and health monitoring
-let workingModel = null; // Cached working model name
-let modelDiscoveryAttempts = 0;
-let lastModelDiscoveryTime = 0;
-const MODEL_DISCOVERY_INTERVAL = 5 * 60 * 1000; // Re-check models every 5 minutes
-const MAX_MODEL_DISCOVERY_ATTEMPTS = 3; // Max attempts per discovery session
+// Last model that successfully answered (for health stats)
+let workingModel = null;
 
 // Health monitoring
 const healthStats = {
@@ -32,15 +26,6 @@ const healthStats = {
   consecutiveFailures: 0,
   isHealthy: true
 };
-
-// Model names to try (in order of preference)
-// Updated to use latest models from @google/genai SDK
-const MODEL_NAMES = [
-  "gemini-2.5-flash",      // Latest fast model
-  "gemini-1.5-flash",      // Previous fast model
-  "gemini-1.5-pro",        // Previous pro model
-  "gemini-pro"              // Legacy model
-];
 
 /**
  * Generate cache key from task notes
@@ -61,199 +46,24 @@ const isCacheValid = (cachedItem) => {
 };
 
 /**
- * Reset rate limit counter if needed
+ * True if the shared per-minute budget has room (does not consume it)
  */
-const checkRateLimit = () => {
-  const now = Date.now();
-  if (now > rateLimitResetTime) {
-    requestCount = 0;
-    rateLimitResetTime = now + 60000;
-  }
-  return requestCount < MAX_REQUESTS_PER_MINUTE;
-};
+const checkRateLimit = () => generationLimiter.check();
 
 /**
- * Increment rate limit counter
+ * The configured model. No probe requests are made: they cost scarce free-tier quota,
+ * and generateContent already falls back to other models when one is unavailable.
+ * Kept async and under the old names for existing callers.
  */
-const incrementRateLimit = () => {
-  requestCount++;
-};
+const getWorkingModel = async () => PRIMARY_MODEL;
+const discoverWorkingModel = async () => PRIMARY_MODEL;
 
-/**
- * Initialize Gemini AI client
- * API key is automatically picked up from GEMINI_API_KEY environment variable
- */
-const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not set in environment variables");
-  }
-  // New API pattern: pass empty object, API key is read from env variable
-  return new GoogleGenAI({});
-};
-
-/**
- * Test if a model is available and working
- * @param {string} modelName - The model name to test
- * @returns {Promise<boolean>} - True if model works, false otherwise
- * @throws {Error} - Throws rate limit errors (429) so discovery can handle them
- */
-const testModel = async (modelName) => {
-  try {
-    const genAI = getGeminiClient();
-    
-    // Test with a simple prompt
-    const testPrompt = "Respond with only: OK";
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Model test timeout")), 3000)
-    );
-    
-    // New API pattern: use genAI.models.generateContent()
-    const apiPromise = genAI.models.generateContent({
-      model: modelName,
-      contents: testPrompt
-    });
-    
-    const response = await Promise.race([apiPromise, timeoutPromise]);
-    
-    // Check if response is valid
-    if (response && (response.text || response.response)) {
-      return true;
-    }
-    
-    return false;
-  } catch (error) {
-    // Check for rate limit errors (429) - these should be re-thrown
-    const isRateLimit = error.code === 429 || 
-                       error.status === 429 ||
-                       (error.error && error.error.code === 429) ||
-                       error.message?.includes("429") || 
-                       error.message?.includes("quota") ||
-                       error.message?.includes("RESOURCE_EXHAUSTED");
-    
-    // Check for model not found errors (404)
-    const isNotFound = error.code === 404 || 
-                      error.status === 404 ||
-                      (error.error && error.error.code === 404) ||
-                      error.message?.includes("404") ||
-                      error.message?.includes("not found");
-    
-    // Re-throw rate limit errors so discovery can handle them gracefully
-    if (isRateLimit) {
-      const rateLimitError = new Error("Rate limit exceeded during model test");
-      rateLimitError.code = 429;
-      rateLimitError.isRateLimit = true;
-      throw rateLimitError;
-    }
-    
-    // Log but don't throw for 404 or other errors - this is expected for unavailable models
-    if (process.env.NODE_ENV !== "production") {
-      if (isNotFound) {
-        console.log(`[Categorization] Model ${modelName} not found (404) - skipping`);
-      } else {
-        console.log(`[Categorization] Model ${modelName} test failed: ${error.message?.substring(0, 100) || 'Unknown error'}`);
-      }
-    }
-    
-    return false;
-  }
-};
-
-/**
- * Discover and cache a working model
- * @param {boolean} forceRefresh - Force re-discovery even if model is cached
- * @returns {Promise<string|null>} - Working model name or null if none found
- */
-const discoverWorkingModel = async (forceRefresh = false) => {
-  const now = Date.now();
-  
-  // Return cached model if still valid and not forcing refresh
-  if (!forceRefresh && workingModel && (now - lastModelDiscoveryTime < MODEL_DISCOVERY_INTERVAL)) {
-    return workingModel;
-  }
-  
-  // Check if we should attempt discovery (avoid too many attempts)
-  if (modelDiscoveryAttempts >= MAX_MODEL_DISCOVERY_ATTEMPTS && !forceRefresh) {
-    console.warn(`[Categorization] Model discovery attempts exceeded, using cached model: ${workingModel || 'none'}`);
-    return workingModel;
-  }
-  
-  // Check rate limit before starting discovery (unless forcing refresh)
-  if (!forceRefresh && !checkRateLimit()) {
-    console.warn(`[Categorization] Rate limit active, skipping model discovery. Using cached model: ${workingModel || 'none'}`);
-    return workingModel; // Return cached model if available, or null if none
-  }
-  
-  console.log(`[Categorization] Starting model discovery...`);
-  modelDiscoveryAttempts++;
-  lastModelDiscoveryTime = now;
-  
-  // Try each model in order with proper rate limit handling
-  for (let i = 0; i < MODEL_NAMES.length; i++) {
-    const modelName = MODEL_NAMES[i];
-    
-    // Check rate limit before each test
-    if (!checkRateLimit()) {
-      console.warn(`[Categorization] Rate limit reached during discovery at model ${i + 1}/${MODEL_NAMES.length}. Stopping discovery.`);
-      // If we have a cached model, return it; otherwise return null
-      return workingModel || null;
-    }
-    
-    try {
-      const isWorking = await testModel(modelName);
-      incrementRateLimit(); // Count the test request
-      
-      if (isWorking) {
-        workingModel = modelName;
-        modelDiscoveryAttempts = 0; // Reset on success
-        console.log(`[Categorization] ✓ Discovered working model: ${modelName}`);
-        healthStats.isHealthy = true;
-        healthStats.consecutiveFailures = 0;
-        return modelName;
-      }
-    } catch (error) {
-      // Handle rate limit errors specifically
-      if (error.isRateLimit || error.code === 429) {
-        console.warn(`[Categorization] Rate limit hit during model test for ${modelName}. Stopping discovery.`);
-        // Update rate limit state
-        rateLimitResetTime = Date.now() + 60000; // Reset in 1 minute
-        requestCount = MAX_REQUESTS_PER_MINUTE; // Mark as exhausted
-        return workingModel || null; // Return cached model if available
-      }
-      
-      // For other errors, continue to next model
-      if (process.env.NODE_ENV !== "production") {
-        console.log(`[Categorization] Model ${modelName} test error: ${error.message?.substring(0, 100) || 'Unknown error'}`);
-      }
-    }
-    
-    // Respect rate limits: wait 13 seconds between tests (to stay under 5/min)
-    // Only wait if not the last model
-    if (i < MODEL_NAMES.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 13000));
-    }
-  }
-  
-  // No working model found
-  console.error(`[Categorization] ✗ No working model found after testing ${MODEL_NAMES.length} models`);
-  workingModel = null;
-  healthStats.isHealthy = false;
-  healthStats.consecutiveFailures++;
-  
-  return null;
-};
-
-/**
- * Get or discover a working model
- * @returns {Promise<string|null>} - Working model name or null
- */
-const getWorkingModel = async () => {
-  if (workingModel) {
-    return workingModel;
-  }
-  
-  // Attempt discovery
-  return await discoverWorkingModel(false);
+/** Wrap quota errors the way the batch code expects (err.isRateLimit). */
+const toRateLimitError = (err) => {
+  const e = new Error(err.message || "Rate limit exceeded");
+  e.isRateLimit = true;
+  e.originalError = err;
+  return e;
 };
 
 /**
@@ -321,26 +131,6 @@ const categorizeTask = async (taskNotes, useCache = true) => {
   }
 
   try {
-    // Get or discover working model
-    const modelName = await getWorkingModel();
-    
-    if (!modelName) {
-      // No working model found - graceful degradation
-      healthStats.failedRequests++;
-      healthStats.lastFailureTime = Date.now();
-      healthStats.consecutiveFailures++;
-      console.warn(`[Categorization] No working model available, using default category`);
-      return {
-        category: "General",
-        source: "default",
-        confidence: null
-      };
-    }
-
-    // Initialize Gemini client
-    const genAI = getGeminiClient();
-    
-    // Create prompt for categorization
     const prompt = `Analyze this task note and categorize it into EXACTLY ONE of these categories: Support, Sales, Technical, Billing, Urgent, or General.
 
 Task note: "${trimmedNotes}"
@@ -355,171 +145,65 @@ Rules:
 
 Respond with ONLY the category name, nothing else. No explanations, no additional text.`;
 
-    incrementRateLimit();
+    // Retries, overload handling and fallback models are handled by generateContent
+    const { response, model } = await generateContent({ contents: prompt });
+    workingModel = model;
 
-    // Call Gemini API with timeout and retry logic
-    let lastError = null;
-    const maxRetries = 2;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Categorization timeout")), 5000)
-        );
+    // Validate and normalize category
+    const normalizedText = (response.text || "").toLowerCase().trim();
+    const category = CATEGORIES.find((cat) => normalizedText.includes(cat.toLowerCase())) || "General";
 
-        // New API pattern: use genAI.models.generateContent()
-        const apiPromise = genAI.models.generateContent({
-          model: modelName,
-          contents: prompt
-        });
-        
-        const response = await Promise.race([apiPromise, timeoutPromise]);
-        
-        // New API: response.text is accessed directly as a property
-        const text = (response.text || '').trim();
+    // Cache the result
+    const cacheKey = generateCacheKey(trimmedNotes);
+    if (cacheKey) {
+      categorizationCache.set(cacheKey, {
+        category,
+        confidence: null, // Gemini doesn't provide confidence scores
+        timestamp: Date.now()
+      });
 
-        // Validate and normalize category
-        let category = "General";
-        const normalizedText = text.toLowerCase().trim();
-        
-        for (const cat of CATEGORIES) {
-          if (normalizedText.includes(cat.toLowerCase())) {
-            category = cat;
-            break;
-          }
+      // Clean old cache entries periodically (keep cache size manageable)
+      if (categorizationCache.size > 1000) {
+        const entries = Array.from(categorizationCache.entries());
+        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+        // Remove oldest 200 entries
+        for (let i = 0; i < 200; i++) {
+          categorizationCache.delete(entries[i][0]);
         }
-
-        // If no match found, use General
-        if (!CATEGORIES.includes(category)) {
-          category = "General";
-        }
-
-        // Cache the result
-        const cacheKey = generateCacheKey(trimmedNotes);
-        if (cacheKey) {
-          categorizationCache.set(cacheKey, {
-            category,
-            confidence: null, // Gemini doesn't provide confidence scores
-            timestamp: Date.now()
-          });
-
-          // Clean old cache entries periodically (keep cache size manageable)
-          if (categorizationCache.size > 1000) {
-            const entries = Array.from(categorizationCache.entries());
-            entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
-            // Remove oldest 200 entries
-            for (let i = 0; i < 200; i++) {
-              categorizationCache.delete(entries[i][0]);
-            }
-          }
-        }
-
-        // Success - update health stats
-        healthStats.successfulRequests++;
-        healthStats.lastSuccessTime = Date.now();
-        healthStats.consecutiveFailures = 0;
-        healthStats.isHealthy = true;
-        
-        if (process.env.NODE_ENV !== "production") {
-          console.log(`[Categorization] Successfully categorized as: ${category} (model: ${modelName})`);
-        }
-        
-        return {
-          category,
-          source: "ai",
-          confidence: null
-        };
-        
-      } catch (err) {
-        lastError = err;
-        
-        // Check if it's a rate limit error (429)
-        const isRateLimit = err.status === 429 || 
-                           err.code === 429 || 
-                           (err.message && err.message.includes("429")) ||
-                           (err.message && err.message.includes("quota")) ||
-                           (err.message && err.message.includes("RESOURCE_EXHAUSTED")) ||
-                           (err.error && (
-                             err.error.code === 429 ||
-                             err.error.status === 429 ||
-                             err.error.message?.includes("429") ||
-                             err.error.message?.includes("quota") ||
-                             err.error.message?.includes("RESOURCE_EXHAUSTED")
-                           ));
-        
-        if (isRateLimit) {
-          // Create rate limit error to be caught by outer catch
-          const rateLimitError = new Error("Rate limit exceeded");
-          rateLimitError.isRateLimit = true;
-          rateLimitError.originalError = err;
-          throw rateLimitError;
-        }
-        
-        // If it's a model not found error, try to discover a new model
-        if (err.message && err.message.includes("not found")) {
-          console.warn(`[Categorization] Model ${modelName} no longer available, re-discovering...`);
-          workingModel = null; // Clear cached model
-          const newModel = await discoverWorkingModel(true);
-          if (newModel && attempt < maxRetries) {
-            // Retry with new model
-            continue;
-          }
-        }
-        
-        // For other errors, wait before retry (exponential backoff)
-        if (attempt < maxRetries) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 3000); // Max 3 seconds
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-        
-        // All retries exhausted
-        throw err;
       }
     }
 
-    // Should not reach here, but just in case
-    throw lastError || new Error("Unknown categorization error");
+    // Success - update health stats
+    healthStats.successfulRequests++;
+    healthStats.lastSuccessTime = Date.now();
+    healthStats.consecutiveFailures = 0;
+    healthStats.isHealthy = true;
 
+    if (process.env.NODE_ENV !== "production") {
+      console.log(`[Categorization] Successfully categorized as: ${category} (model: ${model})`);
+    }
+
+    return {
+      category,
+      source: "ai",
+      confidence: null
+    };
   } catch (error) {
     // Update health stats
     healthStats.failedRequests++;
     healthStats.lastFailureTime = Date.now();
     healthStats.consecutiveFailures++;
-    
-    // Check if it's a rate limit error
-    const isRateLimit = error.status === 429 || 
-                       error.code === 429 || 
-                       (error.message && error.message.includes("429")) ||
-                       (error.message && error.message.includes("quota")) ||
-                       (error.message && error.message.includes("RESOURCE_EXHAUSTED")) ||
-                       (error.originalError && (
-                         error.originalError.status === 429 ||
-                         error.originalError.code === 429 ||
-                         error.originalError.message?.includes("429") ||
-                         error.originalError.message?.includes("quota") ||
-                         error.originalError.message?.includes("RESOURCE_EXHAUSTED")
-                       ));
-    
-    if (isRateLimit) {
-      // Throw a specific rate limit error that can be caught
-      const rateLimitError = new Error("Rate limit exceeded");
-      rateLimitError.isRateLimit = true;
-      rateLimitError.originalError = error.originalError || error;
-      throw rateLimitError;
+    if (healthStats.consecutiveFailures >= 5) healthStats.isHealthy = false;
+
+    // Quota exhausted on every model: let batch callers stop early
+    if (error instanceof AiBusyError) {
+      console.warn(`[Categorization] ${error.message}`);
+      throw toRateLimitError(error);
     }
-    
-    // If too many consecutive failures, mark as unhealthy
-    if (healthStats.consecutiveFailures >= 5) {
-      healthStats.isHealthy = false;
-      // Try to discover a new model
-      workingModel = null;
-      await discoverWorkingModel(true);
-    }
-    
+
     console.error(`[Categorization] Error categorizing task: ${error.message}`);
-    
-    // For non-rate-limit errors, return default category gracefully
+
+    // For other errors, return default category gracefully
     return {
       category: "General",
       source: "default",
@@ -768,32 +452,21 @@ const categorizeChunkBatch = async (chunk) => {
     return [];
   }
   
-  const modelName = await getWorkingModel();
-  if (!modelName) {
-    throw new Error("No working model available");
-  }
-  
-  // Check rate limit
+  // Check the shared budget before building the prompt (generateContent also enforces it)
   if (!checkRateLimit()) {
-    throw new Error("Rate limit exceeded");
+    throw toRateLimitError(new Error("Rate limit exceeded"));
   }
   
-  const genAI = getGeminiClient();
   const prompt = buildBatchPrompt(chunk);
   
-  incrementRateLimit();
-  
-  const timeoutPromise = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error("Batch categorization timeout")), 10000)
-  );
-  
-  const apiPromise = genAI.models.generateContent({
-    model: modelName,
-    contents: prompt
-  });
-  
-  const response = await Promise.race([apiPromise, timeoutPromise]);
-  const text = (response.text || '').trim();
+  // Retries, overload handling and fallback models are handled by generateContent
+  let response;
+  try {
+    ({ response } = await generateContent({ contents: prompt }));
+  } catch (err) {
+    throw err instanceof AiBusyError ? toRateLimitError(err) : err;
+  }
+  const text = (response.text || "").trim();
   
   // Parse response
   const parsedResults = parseBatchResponse(text, chunk.length);
@@ -1199,6 +872,7 @@ const getHealthStats = () => {
     ...healthStats,
     successRate: `${successRate}%`,
     workingModel: workingModel || "none",
+    models: getModelStatus(),
     cacheHitRate: healthStats.totalRequests > 0
       ? ((healthStats.cacheHits / healthStats.totalRequests) * 100).toFixed(2) + "%"
       : "0%"
@@ -1206,18 +880,14 @@ const getHealthStats = () => {
 };
 
 /**
- * Initialize model discovery on module load (non-blocking)
- * NOTE: This is now LAZY - discovery only happens when first categorization is needed
- * This prevents rate limit issues at server startup
+ * Log the model setup on start. No API calls are made here (they would cost quota).
  */
 const initializeModelDiscovery = async () => {
-  // Lazy initialization: Don't discover at startup
-  // Discovery will happen automatically when categorizeTask is first called
-  // This prevents hitting rate limits during server startup
-  console.log(`[Categorization] Service initialized. Model discovery will happen on first categorization request.`);
+  const { primary, fallbacks } = getModelStatus();
+  console.log(`[Categorization] AI ready. Model: ${primary}; fallbacks: ${fallbacks.join(", ") || "none"}`);
 };
 
-// Auto-initialize on module load (but don't discover models yet)
+// Log the configuration on module load
 if (process.env.ENABLE_AI_CATEGORIZATION !== "false") {
   initializeModelDiscovery();
 }
@@ -1230,5 +900,8 @@ module.exports = {
   getHealthStats,
   discoverWorkingModel,
   initializeModelDiscovery,
+  // Reused by the RAG / Call Assist services
+  getWorkingModel,
+  getGeminiClient,
   CATEGORIES
 };

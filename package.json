@@ -6,20 +6,34 @@
   "scripts": {
     "start": "node script.js",
     "dev": "nodemon script.js",
-    "migrate:categories": "node scripts/migrateCategories.js"
+    "test": "vitest run",
+    "migrate:categories": "node scripts/migrateCategories.js",
+    "create:admin": "node scripts/createAdmin.js",
+    "index:leads": "node scripts/indexLeads.js",
+    "chroma:check": "node scripts/checkChroma.js"
   },
   "dependencies": {
     "@google/genai": "^1.33.0",
     "bcryptjs": "^3.0.2",
+    "chromadb": "^3.5.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "csv-parser": "^3.2.0",
     "debug": "^4.4.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.13.0",
     "mongoose": "^8.12.1",
     "multer": "^1.4.5-lts.1",
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.10",
+    "pdf-parse": "^2.4.5",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.0",
+    "vitest": "^5.0.2"
   }
 }

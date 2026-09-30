@@ -1,34 +1,38 @@
-const jwt = require("jsonwebtoken"); // Import the jsonwebtoken package
+const jwt = require("jsonwebtoken");
 
 /**
- * Middleware to authenticate users using JWT.
- * This function checks if the request contains a valid token in the Authorization header.
+ * Middleware to authenticate requests using JWT from the HttpOnly cookie or Authorization header.
+ * Tokens in the query string are not accepted: URLs end up in logs, history and Referer headers.
  */
 const authenticate = (req, res, next) => {
-  // Retrieve the Authorization header
-  const authHeader = req.header("Authorization");
+  let token = null;
 
-  // Check if the token exists and follows the expected "Bearer <token>" format
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Access Denied: Invalid Token Format" });
+  // Check Authorization header (non-browser API clients)
+  const authHeader = req.header("Authorization");
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.split(" ")[1];
+  } else if (req.cookies && req.cookies.token) {
+    // Check cookie
+    token = req.cookies.token;
   }
 
-  // Extract the token by removing the "Bearer " prefix
-  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).json({ message: "Access Denied: Authentication token required" });
+  }
 
   try {
-    // Verify the token using the secret key
     const verified = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Attach the decoded user data to the request object for further use in protected routes
-    req.user = verified;
+    // Legacy tokens without id/role must re-authenticate; role is never guessed
+    if (!verified.id || !verified.role) {
+      return res.status(401).json({ message: "Session expired, please log in again" });
+    }
 
-    // Proceed to the next middleware or route handler
+    req.user = verified;
     next();
   } catch (error) {
-    // Handle invalid or expired token errors
-    res.status(401).json({ message: "Invalid or Expired Token" });
+    return res.status(401).json({ message: "Invalid or expired authentication token" });
   }
 };
 
-module.exports = authenticate; // Export the middleware for use in routes
+module.exports = authenticate;

@@ -5,13 +5,13 @@ const agentSchema = new mongoose.Schema(
     name: {
       type: String,
       required: true,
-      trim: true, // Remove whitespace
+      trim: true,
     },
     email: {
       type: String,
       unique: true,
       required: true,
-      lowercase: true, // Normalize email
+      lowercase: true,
       trim: true,
     },
     mobile: {
@@ -28,16 +28,32 @@ const agentSchema = new mongoose.Schema(
       enum: ["Available", "Not-Available", "Decommissioned"],
       default: "Available",
     },
+    role: {
+      type: String,
+      enum: ["agent"],
+      default: "agent",
+    },
   },
   {
-    timestamps: true, // Automatically adds createdAt and updatedAt
+    timestamps: true,
+    toJSON: {
+      transform: function (doc, ret) {
+        delete ret.password;
+        return ret;
+      },
+    },
+    toObject: {
+      transform: function (doc, ret) {
+        delete ret.password;
+        return ret;
+      },
+    },
   }
 );
 
 // Indexes for performance
-// Note: email index is automatically created by unique: true, so we don't need explicit index
-agentSchema.index({ status: 1 }); // For filtering by status
-agentSchema.index({ createdAt: -1 }); // For sorting by join date
-agentSchema.index({ updatedAt: -1 }); // For tracking updates
+agentSchema.index({ status: 1 });
+agentSchema.index({ createdAt: -1 });
+agentSchema.index({ updatedAt: -1 });
 
 module.exports = mongoose.model("Agent", agentSchema);

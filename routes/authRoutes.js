@@ -1,15 +1,31 @@
 const express = require("express");
-const { login , signup, logout} = require("../controllers/authController"); // Import the login controller
+const { login, signup, logout, getMe } = require("../controllers/authController");
+const authenticate = require("../middleware/authMiddleware");
 
-const router = express.Router(); // Create an Express router instance
+const router = express.Router();
 
 /**
  * @route   POST /api/auth/login
- * @desc    Authenticate user and return a JWT token
- * @access  Public
+ * @desc    Authenticate user and return a JWT token + HttpOnly cookie
  */
 router.post("/login", login);
-router.post("/signup" , signup);
-router.get("/logout" , logout)
 
-module.exports = router; // Export the router for use in the main app
+/**
+ * @route   POST /api/auth/signup
+ * @desc    Register a new user or agent
+ */
+router.post("/signup", signup);
+
+/**
+ * @route   GET /api/auth/me
+ * @desc    Get currently logged in user profile
+ */
+router.get("/me", authenticate, getMe);
+
+/**
+ * @route   GET /api/auth/logout
+ * @desc    Clear authentication cookie
+ */
+router.get("/logout", logout);
+
+module.exports = router;

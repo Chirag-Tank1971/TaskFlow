@@ -1,6 +1,8 @@
 const bcrypt = require("bcryptjs"); // Import bcrypt for password hashing
 const Agent = require("../models/Agent"); // Import the Agent model
 const Task = require("../models/Task"); //  Import Task model
+const { logActivity, actorFromReq } = require("../services/activityService");
+const { removeLeads } = require("../services/leadIndexService");
 
 
 // Function to add a new agent
@@ -75,8 +77,21 @@ const deleteAgent = async (req, res) => {
       return res.status(404).json({ message: "Agent not found" });
     }
 
-    // Delete all tasks associated with the agent (Make sure Task model is imported)
+    // Delete all tasks associated with the agent, keeping an audit record of each
+    const doomed = await Task.find({ agent: id }).select("firstName phone status").lean();
     await Task.deleteMany({ agent: id });
+    removeLeads(doomed.map((t) => t._id));
+
+    const actor = actorFromReq(req);
+    await logActivity(
+      doomed.map((t) => ({
+        task: t._id,
+        taskName: t.firstName,
+        type: "deleted",
+        actor,
+        meta: { phone: t.phone, status: t.status, reason: `Agent ${agent.name} was deleted` },
+      }))
+    );
 
     // Delete the agent from the database
     await Agent.findByIdAndDelete(id);

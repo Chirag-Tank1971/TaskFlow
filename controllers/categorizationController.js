@@ -7,6 +7,7 @@ const {
   discoverWorkingModel,
   CATEGORIES 
 } = require("../services/categorizationService");
+const { logActivity, actorFromReq } = require("../services/activityService");
 
 /**
  * Manually categorize a single task
@@ -27,6 +28,7 @@ const categorizeSingleTask = async (req, res) => {
     }
 
     let result;
+    const previousCategory = task.category;
 
     // If category is provided manually, use it
     if (category) {
@@ -61,6 +63,17 @@ const categorizeSingleTask = async (req, res) => {
 
     await task.save();
     await task.populate("agent", "name email");
+
+    if (previousCategory !== task.category) {
+      await logActivity({
+        task: task._id,
+        taskName: task.firstName,
+        type: task.categorySource === "manual" ? "updated" : "categorized",
+        actor: actorFromReq(req),
+        changes: [{ field: "category", from: previousCategory, to: task.category }],
+        meta: { source: task.categorySource },
+      });
+    }
 
     res.json({
       message: "Task categorized successfully",
@@ -97,6 +110,10 @@ const categorizeBulkTasks = async (req, res) => {
         });
       }
 
+      const changing = await Task.find({ _id: { $in: taskIds }, category: { $ne: category } })
+        .select("firstName category")
+        .lean();
+
       const result = await Task.updateMany(
         { _id: { $in: taskIds } },
         {
@@ -107,6 +124,18 @@ const categorizeBulkTasks = async (req, res) => {
             categoryConfidence: null
           }
         }
+      );
+
+      const actor = actorFromReq(req);
+      await logActivity(
+        changing.map((t) => ({
+          task: t._id,
+          taskName: t.firstName,
+          type: "updated",
+          actor,
+          changes: [{ field: "category", from: t.category, to: category }],
+          meta: { source: "manual", bulk: true },
+        }))
       );
 
       return res.json({
@@ -133,9 +162,20 @@ const categorizeBulkTasks = async (req, res) => {
     );
 
     // Update tasks with categorization results
+    const actor = actorFromReq(req);
     const updatePromises = tasks.map(async (task, index) => {
       const result = categorizationResults[index];
       if (result) {
+        if (result.category !== task.category) {
+          await logActivity({
+            task: task._id,
+            taskName: task.firstName,
+            type: "categorized",
+            actor,
+            changes: [{ field: "category", from: task.category, to: result.category }],
+            meta: { source: result.source, bulk: true },
+          });
+        }
         task.category = result.category;
         task.categorySource = result.source;
         task.categorizedAt = result.source === "ai" ? new Date() : null;
@@ -250,11 +290,13 @@ const getHealthStatus = async (req, res) => {
  */
 const rediscoverModel = async (req, res) => {
   try {
+    // No probing any more (it wasted quota): report the configured model chain instead
     const model = await discoverWorkingModel(true);
-    
+
     res.json({
-      message: model ? "Model re-discovery successful" : "No working model found",
+      message: "Models are configured via GEMINI_MODEL / GEMINI_FALLBACK_MODELS; unavailable ones are skipped automatically",
       workingModel: model || null,
+      models: getHealthStats().models,
       timestamp: new Date().toISOString()
     });
   } catch (error) {

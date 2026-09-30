@@ -1,10 +1,12 @@
 const fs = require("fs"); // Import file system module for file handling
 const csv = require("csv-parser"); // Import csv-parser to read CSV files
+const mongoose = require("mongoose");
 const Task = require("../models/Task"); // Import the Task model
 const Agent = require("../models/Agent"); // Import the Agent model
 const Upload = require("../models/Upload"); // Import the Upload model
 const User = require("../models/User"); // Import the User model
 const { categorizeTasksBatch } = require("../services/categorizationService"); // Import categorization service
+const { logActivity, actorFromReq } = require("../services/activityService");
 const {
   generateJobId,
   initializeProgress,
@@ -17,7 +19,7 @@ const {
  * Background processing function for CSV upload
  * Processes file, categorizes tasks, and saves to database
  */
-const processUpload = async (jobId, filePath, filename, fileSize, mimeType, userId, agents) => {
+const processUpload = async (jobId, filePath, filename, fileSize, mimeType, userId, agents, actor) => {
   const startTime = Date.now();
   let uploadRecord = null;
 
@@ -204,17 +206,63 @@ const processUpload = async (jobId, filePath, filename, fileSize, mimeType, user
       agent: agents[index % agents.length]._id,
     }));
 
-    // Bulk insert tasks into the database
-    const createdTasks = await Task.insertMany(distributedTasks);
-    const taskIds = createdTasks.map((task) => task._id);
+    // Perform bulk insertion with transaction support
+    let session = null;
+    try {
+      session = await mongoose.startSession();
+      session.startTransaction();
+    } catch (sessionErr) {
+      session = null; // Transactions may not be supported on standalone instances
+    }
+
+    let createdTasks;
     const processingTime = Date.now() - startTime;
 
-    // Update upload record with success
-    uploadRecord.status = "success";
-    uploadRecord.tasksCreated = createdTasks.length;
-    uploadRecord.processingTime = processingTime;
-    uploadRecord.tasks = taskIds;
-    await uploadRecord.save();
+    if (session) {
+      try {
+        createdTasks = await Task.insertMany(distributedTasks, { session });
+        const taskIds = createdTasks.map((task) => task._id);
+
+        uploadRecord.status = "success";
+        uploadRecord.tasksCreated = createdTasks.length;
+        uploadRecord.processingTime = processingTime;
+        uploadRecord.tasks = taskIds;
+        await uploadRecord.save({ session });
+
+        await session.commitTransaction();
+      } catch (txErr) {
+        await session.abortTransaction();
+        throw txErr;
+      } finally {
+        session.endSession();
+      }
+    } else {
+      createdTasks = await Task.insertMany(distributedTasks);
+      const taskIds = createdTasks.map((task) => task._id);
+
+      uploadRecord.status = "success";
+      uploadRecord.tasksCreated = createdTasks.length;
+      uploadRecord.processingTime = processingTime;
+      uploadRecord.tasks = taskIds;
+      await uploadRecord.save();
+    }
+
+    // Audit trail: one "imported" entry per created task
+    const agentNames = new Map(agents.map((a) => [a._id.toString(), a.name]));
+    await logActivity(
+      createdTasks.map((t) => ({
+        task: t._id,
+        taskName: t.firstName,
+        type: "imported",
+        actor,
+        meta: {
+          uploadId: uploadRecord._id,
+          filename,
+          agent: { id: t.agent.toString(), name: agentNames.get(t.agent.toString()) || null },
+          category: t.category,
+        },
+      }))
+    );
 
     // Delete the uploaded file after processing
     if (fs.existsSync(filePath)) {
@@ -299,20 +347,22 @@ const uploadCSV = async (req, res) => {
       });
     }
 
-    // Additional check: Verify this is not an agent trying to upload
-    if (normalizedEmail.endsWith("@agent.com")) {
+    // Verify this is not an agent trying to upload
+    if (req.user.role === "agent") {
       if (req.file) fs.unlinkSync(req.file.path);
       return res.status(403).json({ 
-        message: "Access denied. Only admin users can upload CSV files." 
+        message: "Access denied. Only admin and manager users can upload task CSV files." 
       });
     }
 
-    // Fetch available agents from the database
-    const agents = await Agent.find();
+    // Fetch ONLY available agents from the database
+    const agents = await Agent.find({ status: "Available" });
     if (agents.length === 0) {
-      // Cleanup file if no agents
+      // Cleanup file if no active agents
       if (req.file) fs.unlinkSync(req.file.path);
-      return res.status(400).json({ message: "No agents available" });
+      return res.status(400).json({ 
+        message: "No available agents found. Please ensure at least one agent has status 'Available' before uploading tasks." 
+      });
     }
 
     // Generate job ID for progress tracking
@@ -331,7 +381,8 @@ const uploadCSV = async (req, res) => {
       req.file.size,
       req.file.mimetype,
       user._id,
-      agents
+      agents,
+      actorFromReq(req)
     ).catch(err => {
       console.error(`[Upload] Background processing error for job ${jobId}:`, err);
     });

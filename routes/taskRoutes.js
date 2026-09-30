@@ -5,9 +5,16 @@ const {
   deleteTasks, 
   updateTasks,
   bulkDeleteTasks,
-  bulkUpdateTaskStatus
+  bulkUpdateTaskStatus,
+  createTask,
+  editTask,
+  bulkAssignTasks,
+  logCall,
 } = require("../controllers/taskController"); // Import task controllers
 const authenticate = require("../middleware/authMiddleware"); // Import authentication middleware
+const authorize = require("../middleware/authorize");
+const { getTaskActivity } = require("../controllers/activityController");
+const { callAssist } = require("../controllers/knowledgeController");
 
 const router = express.Router(); // Create an Express router instance
 
@@ -17,6 +24,20 @@ const router = express.Router(); // Create an Express router instance
  * @access  Private (requires authentication)
  */
 router.get("/", authenticate, getTasks);
+
+/**
+ * @route   POST /api/tasks
+ * @desc    Create a single task (auto-assigns and AI-categorizes when not specified)
+ * @access  Private (Admin/Manager only)
+ */
+router.post("/", authenticate, authorize(["admin", "manager"]), createTask);
+
+/**
+ * @route   POST /api/tasks/bulk/assign
+ * @desc    Reassign multiple tasks to one agent
+ * @access  Private (Admin/Manager only)
+ */
+router.post("/bulk/assign", authenticate, authorize(["admin", "manager"]), bulkAssignTasks);
 
 /**
  * @route   DELETE /api/tasks/bulk
@@ -52,5 +73,33 @@ router.delete("/:taskId", authenticate, deleteTasks);
  * @access  Private (requires authentication)
  */
 router.post("/:taskId", authenticate, updateTasks);
+
+/**
+ * @route   PATCH /api/tasks/:taskId
+ * @desc    Edit task details / reassign (agents: notes and status of own tasks only)
+ * @access  Private (requires authentication)
+ */
+router.patch("/:taskId", authenticate, editTask);
+
+/**
+ * @route   POST /api/tasks/:taskId/calls
+ * @desc    Log a call attempt (outcome, note, optional callback time)
+ * @access  Private (agents: own tasks only)
+ */
+router.post("/:taskId/calls", authenticate, logCall);
+
+/**
+ * @route   GET /api/tasks/:taskId/activity
+ * @desc    Full history of a task (edits, status changes, reassignments, calls)
+ * @access  Private (agents: own tasks only)
+ */
+router.get("/:taskId/activity", authenticate, getTaskActivity);
+
+/**
+ * @route   POST /api/tasks/:taskId/assist
+ * @desc    AI Call Assist: talking points from lead history, similar converted leads and the knowledge base
+ * @access  Private (agents: own tasks only)
+ */
+router.post("/:taskId/assist", authenticate, callAssist);
 
 module.exports = router; // Export the router for use in the main app
