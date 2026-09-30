@@ -22,7 +22,8 @@ const multer = require("multer");
 const getAllowedOrigins = () => {
   const envOrigins = process.env.ALLOWED_ORIGINS;
   if (envOrigins) {
-    return envOrigins.split(",").map((origin) => origin.trim()).filter(Boolean);
+    // Browsers send origins without a trailing slash; tolerate "https://app.vercel.app/" in the setting
+    return envOrigins.split(",").map((origin) => origin.trim().replace(/\/+$/, "")).filter(Boolean);
   }
   return [
     "http://localhost:3000",
@@ -33,6 +34,8 @@ const getAllowedOrigins = () => {
 };
 
 const allowedOrigins = getAllowedOrigins();
+const rejectedOriginsLogged = new Set();
+console.log(`[CORS] Allowed origins: ${allowedOrigins.join(", ")}`);
 
 const isValidOrigin = (origin) => {
   if (!origin) return false;
@@ -130,6 +133,14 @@ app.use(
       // so a server deployed without NODE_ENV=production is not left wide open)
       if (process.env.NODE_ENV !== "production" && isLocalhost(origin)) {
         return callback(null, true);
+      }
+      // Log once per origin so a missing ALLOWED_ORIGINS entry is obvious in the host's logs
+      if (!rejectedOriginsLogged.has(origin)) {
+        rejectedOriginsLogged.add(origin);
+        console.warn(
+          `[CORS] Rejected origin ${origin}. If this is your frontend, add it to ALLOWED_ORIGINS ` +
+            `(currently: ${allowedOrigins.join(", ") || "none"}).`
+        );
       }
       callback(new Error("Not allowed by CORS"), false);
     },
