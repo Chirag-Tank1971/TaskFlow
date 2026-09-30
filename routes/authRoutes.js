@@ -6,7 +6,7 @@ const router = express.Router();
 
 /**
  * @route   POST /api/auth/login
- * @desc    Authenticate user and return a JWT token + HttpOnly cookie
+ * @desc    Authenticate user; the session JWT is set as an HttpOnly cookie only
  */
 router.post("/login", login);
 
