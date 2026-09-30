@@ -1,0 +1,220 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-heading: 'Outfit', sans-serif;
+    --font-sans: 'Inter', sans-serif;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #090D16;
+    color: #F8FAFC;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+  }
+}
+
+/* Custom modern scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B1120;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #25334D;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3B82F6;
+}
+
+/* Glassmorphism utilities */
+.glass-panel {
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(51, 65, 85, 0.4);
+}
+
+.glass-panel-hover {
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-panel-hover:hover {
+  border-color: rgba(99, 102, 241, 0.4);
+  box-shadow: 0 8px 30px -8px rgba(99, 102, 241, 0.15);
+  transform: translateY(-2px);
+}
+
+/* Used by modals and panels (was referenced but never defined) */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.animate-fadeIn {
+  animation: fadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ---------- "Ask TaskFlow AI" launcher button ---------- */
+@keyframes ai-launcher-pop {
+  0% { opacity: 0; transform: translateY(12px) scale(0.85); }
+  60% { opacity: 1; transform: translateY(-2px) scale(1.04); }
+  100% { opacity: 1; transform: none; }
+}
+
+/* Breathing glow around the button */
+@keyframes ai-launcher-glow {
+  0%, 100% { box-shadow: 0 10px 25px -8px rgba(99, 102, 241, 0.45), 0 0 0 0 rgba(139, 92, 246, 0.45); }
+  50% { box-shadow: 0 12px 32px -6px rgba(139, 92, 246, 0.6), 0 0 0 8px rgba(139, 92, 246, 0); }
+}
+
+/* Light sweep across the button; mostly idle so it reads as a gentle hint */
+@keyframes ai-launcher-shimmer {
+  0% { transform: translateX(-120%) skewX(-20deg); }
+  35%, 100% { transform: translateX(260%) skewX(-20deg); }
+}
+
+/* Twinkling sparkle icon */
+@keyframes ai-launcher-twinkle {
+  0%, 70%, 100% { transform: rotate(0deg) scale(1); opacity: 1; }
+  78% { transform: rotate(-14deg) scale(1.2); opacity: 0.85; }
+  86% { transform: rotate(10deg) scale(0.95); opacity: 1; }
+}
+
+/*
+ * The button is fixed at bottom-left and its width is set in px by AiLauncher.jsx
+ * (48px collapsed ↔ measured label width), so it grows strictly left-to-right.
+ * Only width (for the reveal) and transform/opacity (for the text) are transitioned.
+ */
+.ai-launcher {
+  --ai-ease: cubic-bezier(0.22, 1, 0.36, 1); /* ease-out-quint: quick start, soft landing (text, lift) */
+  /* ease-in-out for the width: starts gently, so the pill doesn't lurch in the first frames */
+  --ai-width-ease: cubic-bezier(0.45, 0, 0.2, 1);
+  position: fixed;
+  overflow: hidden;
+  isolation: isolate;
+  white-space: nowrap;
+  /* "backwards", not "both": holding the pop's final transform would block the hover lift */
+  animation:
+    ai-launcher-pop 0.5s var(--ai-ease) backwards,
+    ai-launcher-glow 3s ease-in-out 0.5s infinite;
+  /*
+   * Resting filter uses the SAME function list as the open state (with zero values), so the
+   * browser interpolates the open-glow smoothly instead of snapping it on.
+   */
+  filter: brightness(1) drop-shadow(0 0 0 rgba(167, 139, 250, 0)) drop-shadow(0 0 0 rgba(99, 102, 241, 0));
+  /* closing: let the text fade first, then shrink */
+  transition:
+    width 0.45s var(--ai-width-ease) 0.05s,
+    transform 0.35s var(--ai-ease),
+    filter 0.45s ease;
+}
+
+.ai-launcher[data-expanded="true"] {
+  transform: translateY(-2px);
+  /* soft violet halo while open (drop-shadow isn't clipped by overflow:hidden, and works
+     even when the looping box-shadow glow is disabled for reduced motion) */
+  filter: brightness(1.1) drop-shadow(0 0 10px rgba(167, 139, 250, 0.55)) drop-shadow(0 4px 22px rgba(99, 102, 241, 0.45));
+  /* opening: start widening immediately */
+  transition:
+    width 0.5s var(--ai-width-ease),
+    transform 0.35s var(--ai-ease),
+    filter 0.5s ease;
+}
+
+.ai-launcher:active {
+  transform: scale(0.97);
+}
+
+.ai-launcher:focus-visible {
+  outline: 2px solid rgba(196, 181, 253, 0.9);
+  outline-offset: 3px;
+}
+
+/* Light sweep (kept behind the content) */
+.ai-launcher::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  animation: ai-launcher-shimmer 4s ease-in-out 1s infinite;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.ai-launcher-icon {
+  animation: ai-launcher-twinkle 4s ease-in-out 1.2s infinite;
+  transform-origin: center;
+}
+
+.ai-launcher[data-expanded="true"] .ai-launcher-icon {
+  animation-play-state: paused; /* stay still while the label is showing */
+}
+
+/* Label: always laid out at full width (so it can be measured), revealed by the widening button */
+.ai-launcher-text {
+  flex-shrink: 0;
+  padding-left: 0.6rem;
+  opacity: 0;
+  transform: translateX(-10px);
+  text-shadow: 0 0 0 rgba(255, 255, 255, 0);
+  transition:
+    opacity 0.15s ease,
+    transform 0.3s var(--ai-ease),
+    text-shadow 0.3s ease;
+}
+
+.ai-launcher[data-expanded="true"] .ai-launcher-text {
+  opacity: 1;
+  transform: none;
+  text-shadow: 0 0 10px rgba(237, 233, 254, 0.6); /* faint glow on the label */
+  transition:
+    opacity 0.3s ease 0.15s, /* fade in once there's room */
+    transform 0.45s var(--ai-ease) 0.1s,
+    text-shadow 0.5s ease 0.2s;
+}
+
+/* The sparkle glows too while open */
+.ai-launcher-icon {
+  filter: drop-shadow(0 0 0 rgba(255, 255, 255, 0));
+  transition: filter 0.4s ease;
+}
+.ai-launcher[data-expanded="true"] .ai-launcher-icon {
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.75));
+}
+
+/*
+ * Reduced motion (e.g. Windows "Animation effects" off): drop the continuous/looping effects
+ * (glow, shimmer, twinkle) and the bouncy pop-in, but KEEP the short hover expand + fade.
+ * It is small, brief and user-triggered, which reduced-motion guidance allows; removing it
+ * made the button snap open instantly, which looked broken.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .ai-launcher,
+  .ai-launcher::before,
+  .ai-launcher-icon {
+    animation: none;
+  }
+  .ai-launcher::before {
+    display: none;
+  }
+  .ai-launcher {
+    box-shadow: 0 10px 25px -8px rgba(99, 102, 241, 0.45); /* static glow instead of the pulse */
+  }
+  .ai-launcher[data-expanded="true"] {
+    transform: none; /* no lift */
+  }
+  .ai-launcher-text {
+    transform: none; /* fade only, no slide */
+  }
+}
