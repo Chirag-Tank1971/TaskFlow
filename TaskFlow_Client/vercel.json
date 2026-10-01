@@ -7,7 +7,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://taskflow-server-qmtw.onrender.com/api/:path*"
+      "destination": "https://taskflow-5zsy.onrender.com/api/:path*"
     },
     {
       "source": "/(.*)",
