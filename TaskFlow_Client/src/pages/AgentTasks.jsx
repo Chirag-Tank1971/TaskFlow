@@ -12,6 +12,7 @@ import LogCallModal from "../components/tasks/LogCallModal";
 import { hasOpenCallback, isCallbackDue } from "../constants/callOutcomes";
 import ConfirmModal from "../components/common/ConfirmModal";
 import { toast } from "react-toastify";
+import { useSocket } from "../context/SocketContext";
 import {
   Search,
   CheckSquare,
@@ -76,6 +77,91 @@ const AgentTasks = () => {
       .then((res) => setAgents(Array.isArray(res.data) ? res.data : []))
       .catch(() => toast.error("Failed to load agents"));
   }, [isAdmin]);
+
+  const { lastTaskEvent, acquireLock, releaseLock } = useSocket();
+
+  // Listen for real-time task mutations across the system
+  useEffect(() => {
+    if (!lastTaskEvent) return;
+
+    if (lastTaskEvent.type === "created") {
+      const newTask = lastTaskEvent.task;
+      // Only add the task if it is explicitly assigned to this agent.
+      // Agents should never see tasks assigned to other agents via real-time events.
+      const taskAgentId = newTask.agent?._id ?? newTask.agent;
+      const isAssignedToMe = taskAgentId && taskAgentId.toString() === agentId?.toString();
+      if (isAdmin || isAssignedToMe) {
+        setTasks((prev) => {
+          if (prev.some((t) => t._id === newTask._id)) return prev;
+          return [newTask, ...prev];
+        });
+        toast.info(`🔔 New lead created: ${newTask.firstName || "Customer"}`);
+      }
+    } else if (lastTaskEvent.type === "updated") {
+      const updated = lastTaskEvent.task;
+      setTasks((prev) => prev.map((t) => (t._id === updated._id ? { ...t, ...updated } : t)));
+      setActiveModalTask((prev) => (prev && prev._id === updated._id ? { ...prev, ...updated } : prev));
+    } else if (lastTaskEvent.type === "deleted") {
+      const { taskId } = lastTaskEvent;
+      setTasks((prev) => prev.filter((t) => t._id !== taskId));
+      setActiveModalTask((prev) => (prev && prev._id === taskId ? null : prev));
+    } else if (lastTaskEvent.type === "bulk_updated") {
+      const { taskIds, updates } = lastTaskEvent;
+      // If agent was changed and it's not us, remove those tasks from our list
+      const newAgentId = updates?.agent?._id?.toString();
+      if (!isAdmin && newAgentId && newAgentId !== agentId?.toString()) {
+        // Tasks were reassigned away from us — drop them
+        setTasks((prev) => prev.filter((t) => !taskIds.includes(t._id)));
+      } else {
+        setTasks((prev) =>
+          prev.map((t) => (taskIds.includes(t._id) ? { ...t, ...updates } : t))
+        );
+      }
+    }
+  }, [lastTaskEvent, isAdmin, agentId]);
+
+  // Lead Collision Lock handlers
+  const handleOpenDetails = async (task) => {
+    const res = await acquireLock(task._id);
+    if (!res.success) {
+      toast.warn(res.message || "Lead is currently locked by another agent");
+      return;
+    }
+    setActiveModalTask(task);
+  };
+
+  const handleCloseDetails = () => {
+    if (activeModalTask) releaseLock(activeModalTask._id);
+    setActiveModalTask(null);
+  };
+
+  const handleOpenLogCall = async (task) => {
+    const res = await acquireLock(task._id);
+    if (!res.success) {
+      toast.warn(res.message || "Lead is currently locked by another agent");
+      return;
+    }
+    setLogCallTask(task);
+  };
+
+  const handleCloseLogCall = () => {
+    if (logCallTask) releaseLock(logCallTask._id);
+    setLogCallTask(null);
+  };
+
+  const handleOpenEdit = async (task) => {
+    const res = await acquireLock(task._id);
+    if (!res.success) {
+      toast.warn(res.message || "Lead is currently locked by another agent");
+      return;
+    }
+    setFormState({ task });
+  };
+
+  const handleCloseForm = () => {
+    if (formState?.task) releaseLock(formState.task._id);
+    setFormState(null);
+  };
 
   // Add a newly created task or replace an edited one in place
   const handleTaskSaved = (savedTask, isEdit) => {
@@ -488,9 +574,9 @@ const AgentTasks = () => {
                 isSelected={selectedTaskIds.includes(task._id)}
                 onSelect={toggleSelectTask}
                 onStatusChange={handleStatusChange}
-                onViewDetails={setActiveModalTask}
-                onLogCall={setLogCallTask}
-                onEdit={(t) => setFormState({ task: t })}
+                onViewDetails={handleOpenDetails}
+                onLogCall={handleOpenLogCall}
+                onEdit={handleOpenEdit}
                 onDelete={setDeleteConfirmId}
                 canDelete={true}
               />
@@ -505,9 +591,9 @@ const AgentTasks = () => {
                 isSelected={selectedTaskIds.includes(task._id)}
                 onSelect={toggleSelectTask}
                 onStatusChange={handleStatusChange}
-                onViewDetails={setActiveModalTask}
-                onLogCall={setLogCallTask}
-                onEdit={(t) => setFormState({ task: t })}
+                onViewDetails={handleOpenDetails}
+                onLogCall={handleOpenLogCall}
+                onEdit={handleOpenEdit}
                 onDelete={setDeleteConfirmId}
                 canDelete={true}
               />
@@ -547,16 +633,16 @@ const AgentTasks = () => {
       <TaskModal
         task={activeModalTask}
         isOpen={!!activeModalTask}
-        onClose={() => setActiveModalTask(null)}
+        onClose={handleCloseDetails}
         onStatusChange={handleStatusChange}
-        onLogCall={setLogCallTask}
+        onLogCall={handleOpenLogCall}
       />
 
       {/* Log Call Modal */}
       <LogCallModal
         task={logCallTask}
         isOpen={!!logCallTask}
-        onClose={() => setLogCallTask(null)}
+        onClose={handleCloseLogCall}
         onLogged={handleCallLogged}
       />
 
@@ -566,7 +652,7 @@ const AgentTasks = () => {
         task={formState?.task || null}
         agents={agents}
         isAdmin={isAdmin}
-        onClose={() => setFormState(null)}
+        onClose={handleCloseForm}
         onSaved={handleTaskSaved}
       />
 

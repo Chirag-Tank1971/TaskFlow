@@ -1,6 +1,7 @@
 import React from "react";
 import { BrowserRouter as Router, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import { SocketProvider } from "./context/SocketContext";
 import AskPanel from "./components/knowledge/AskPanel";
 import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
@@ -33,7 +34,8 @@ const GlobalAskPanel = () => {
 function App() {
   return (
     <AuthProvider>
-      <Router>
+      <SocketProvider>
+        <Router>
         <Routes>
           {/* Public Authentication Routes */}
           <Route path="/" element={<Login />} />
@@ -146,6 +148,7 @@ function App() {
         pauseOnHover
         theme="dark"
       />
+      </SocketProvider>
     </AuthProvider>
   );
 }

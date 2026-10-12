@@ -15,6 +15,12 @@ const {
 const { CALL_OUTCOMES } = require("../constants/callOutcomes");
 const { logActivity, actorFromReq, diffFields, SYSTEM_ACTOR } = require("../services/activityService");
 const { indexLeads, removeLeads, INDEXED_OUTCOMES } = require("../services/leadIndexService");
+const {
+  notifyTaskCreated,
+  notifyTaskUpdated,
+  notifyTaskDeleted,
+  notifyTasksBulkUpdated,
+} = require("../services/socketManager");
 
 // Store agents in the audit log as { id, name } so entries stay readable if the agent is deleted
 const agentRef = (agent) => (agent ? { id: agent._id?.toString() || agent.toString(), name: agent.name || null } : null);
@@ -72,6 +78,8 @@ const categorizeInBackground = (taskId, notes, taskName) => {
           changes: [{ field: "category", from: "General", to: category }],
           meta: { source: "ai" },
         });
+        const categorizedDoc = await Task.findById(taskId).populate("agent", "name email status");
+        if (categorizedDoc) notifyTaskUpdated(categorizedDoc);
       }
     })
     .catch((err) => console.error("Background categorization failed:", err.message));
@@ -244,6 +252,7 @@ const deleteTasks = async (req, res) => {
 
     await task.deleteOne();
     removeLeads([task._id]);
+    notifyTaskDeleted(task._id.toString());
 
     await logActivity({
       task: task._id,
@@ -312,6 +321,8 @@ const updateTasks = async (req, res) => {
       });
     }
 
+    notifyTaskUpdated(task);
+
     res.status(200).json({
       message: "Task updated successfully",
       task,
@@ -349,6 +360,7 @@ const bulkDeleteTasks = async (req, res) => {
     const doomed = await Task.find(filter).select("firstName phone status").lean();
     const deleteResult = await Task.deleteMany({ _id: { $in: doomed.map((t) => t._id) } });
     removeLeads(doomed.map((t) => t._id));
+    doomed.forEach((t) => notifyTaskDeleted(t._id.toString()));
 
     const actor = actorFromReq(req);
     await logActivity(
@@ -418,6 +430,8 @@ const bulkUpdateTaskStatus = async (req, res) => {
       }))
     );
 
+    notifyTasksBulkUpdated(taskIds, { status });
+
     res.status(200).json({
       message: `Successfully updated ${updateResult.modifiedCount} task(s) to ${status}`,
       updatedCount: updateResult.modifiedCount,
@@ -478,6 +492,7 @@ const createTask = async (req, res) => {
     if (!category) categorizeInBackground(task._id, notes, task.firstName);
 
     await task.populate("agent", "name email status");
+    notifyTaskCreated(task);
     res.status(201).json({ message: "Task created successfully", task });
   } catch (error) {
     console.error("Create Task Error:", error);
@@ -567,6 +582,8 @@ const editTask = async (req, res) => {
       reassignChange && { task: task._id, taskName: task.firstName, type: "reassigned", actor, changes: [reassignChange] },
     ]);
 
+    notifyTaskUpdated(task);
+
     res.json({ message: "Task updated successfully", task });
   } catch (error) {
     console.error("Edit Task Error:", error);
@@ -606,6 +623,8 @@ const bulkAssignTasks = async (req, res) => {
         meta: { bulk: true },
       }))
     );
+
+    notifyTasksBulkUpdated(taskIds, { agent: { _id: result.agent._id, name: result.agent.name, email: result.agent.email, status: result.agent.status } });
 
     res.json({
       message: `Reassigned ${updateResult.modifiedCount} task(s) to ${result.agent.name}`,
@@ -686,6 +705,8 @@ const logCall = async (req, res) => {
     if (INDEXED_OUTCOMES.includes(outcome) || INDEXED_OUTCOMES.includes(previousOutcome)) {
       indexLeads(task.toObject());
     }
+
+    notifyTaskUpdated(task);
 
     res.status(201).json({ message: "Call logged", task });
   } catch (error) {

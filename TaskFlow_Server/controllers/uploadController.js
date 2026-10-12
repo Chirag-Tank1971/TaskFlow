@@ -200,11 +200,37 @@ const processUpload = async (jobId, filePath, filename, fileSize, mimeType, user
       processedTasks: tasks.length
     });
 
-    // Assign tasks to agents in a round-robin manner
-    const distributedTasks = categorizedTasks.map((task, index) => ({
-      ...task,
-      agent: agents[index % agents.length]._id,
-    }));
+    // --- Workload-aware lead distribution ---
+    // Fetch each agent's current open (pending + in-progress) task count so that
+    // new leads are assigned to the agent with the lightest existing queue.
+    // This keeps distribution fair even when agents already have unequal loads,
+    // and matches the logic used by manual single-task creation (pickLeastLoadedAgent).
+    const agentIds = agents.map((a) => a._id);
+    const openCounts = await Task.aggregate([
+      { $match: { agent: { $in: agentIds }, status: { $ne: "completed" } } },
+      { $group: { _id: "$agent", count: { $sum: 1 } } },
+    ]);
+    // Build a mutable load map so we can simulate assignments greedily
+    const loadMap = new Map(agents.map((a) => [a._id.toString(), 0]));
+    for (const { _id, count } of openCounts) {
+      loadMap.set(_id.toString(), count);
+    }
+
+    const distributedTasks = categorizedTasks.map((task) => {
+      // Pick the agent with the lowest current load
+      let minLoad = Infinity;
+      let pickedAgent = agents[0];
+      for (const agent of agents) {
+        const load = loadMap.get(agent._id.toString());
+        if (load < minLoad) {
+          minLoad = load;
+          pickedAgent = agent;
+        }
+      }
+      // Increment the simulated load so the next task accounts for this assignment
+      loadMap.set(pickedAgent._id.toString(), minLoad + 1);
+      return { ...task, agent: pickedAgent._id };
+    });
 
     // Perform bulk insertion with transaction support
     let session = null;

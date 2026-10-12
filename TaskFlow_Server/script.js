@@ -220,10 +220,25 @@ app.use((err, req, res, next) => {
   });
 });
 
+const http = require("http");
+const { initSocket } = require("./services/socketManager");
+
+const isOriginAllowed = (origin) => {
+  if (!origin) return true;
+  if (!isValidOrigin(origin)) return false;
+  if (matchesAllowedOrigin(origin)) return true;
+  if (process.env.NODE_ENV !== "production" && isLocalhost(origin)) return true;
+  return false;
+};
+
+const server = http.createServer(app);
+initSocket(server, isOriginAllowed);
+
 const PORT = process.env.PORT || 5000;
 
 if (process.env.NODE_ENV !== "test") {
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 
+app.server = server;
 module.exports = app;

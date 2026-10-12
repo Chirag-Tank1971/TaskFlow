@@ -1,7 +1,8 @@
 import React from "react";
 import CategoryBadge from "../CategoryBadge";
-import { Phone, PhoneCall, Clock, Eye, Pencil, Trash2, CheckCircle2, PlayCircle, AlertCircle, CalendarClock } from "lucide-react";
+import { Phone, PhoneCall, Clock, Eye, Pencil, Trash2, CheckCircle2, PlayCircle, AlertCircle, CalendarClock, Lock } from "lucide-react";
 import { CALL_OUTCOMES, isCallbackDue, hasOpenCallback, formatCallbackTime } from "../../constants/callOutcomes";
+import { useSocket } from "../../context/SocketContext";
 
 const TaskCard = ({
   task,
@@ -37,6 +38,9 @@ const TaskCard = ({
   const outcome = task.outcome ? CALL_OUTCOMES[task.outcome] : null;
   const callbackDue = isCallbackDue(task);
 
+  const { getTaskLockStatus } = useSocket();
+  const { isLocked, lockedByOther, lock } = getTaskLockStatus(task._id);
+
   const formattedDate = task.createdAt
     ? new Date(task.createdAt).toLocaleDateString(undefined, {
         month: "short",
@@ -49,7 +53,9 @@ const TaskCard = ({
   return (
     <div
       className={`glass-panel rounded-xl p-4 border transition-all duration-200 relative group flex flex-col justify-between ${
-        isSelected
+        lockedByOther
+          ? "border-amber-500/50 bg-amber-500/[0.03] shadow-md shadow-amber-500/5"
+          : isSelected
           ? "border-indigo-500 bg-indigo-500/5 shadow-md shadow-indigo-500/10"
           : "border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/40"
       }`}
@@ -136,6 +142,26 @@ const TaskCard = ({
           </div>
         )}
 
+        {/* Real-time Collision Lock Banner */}
+        {isLocked && (
+          <div
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium mb-3 border ${
+              lockedByOther
+                ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                : "bg-indigo-500/10 border-indigo-500/30 text-indigo-300"
+            }`}
+          >
+            <Lock className={`w-3.5 h-3.5 ${lockedByOther ? "text-amber-400 animate-pulse" : "text-indigo-400"} shrink-0`} />
+            <span className="truncate">
+              {lockedByOther ? (
+                <>In progress by <strong className="text-amber-200">{lock.userName}</strong></>
+              ) : (
+                "You are currently working on this lead"
+              )}
+            </span>
+          </div>
+        )}
+
         {/* Task Notes Snippet */}
         <div className="bg-slate-900/60 rounded-lg p-2.5 border border-slate-800/60 mb-3">
           <p className="text-xs text-slate-300 line-clamp-2 leading-relaxed">
@@ -156,8 +182,9 @@ const TaskCard = ({
           {onStatusChange && (
             <select
               value={task.status}
+              disabled={lockedByOther}
               onChange={(e) => onStatusChange(task._id, e.target.value)}
-              className="bg-slate-800/80 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1 outline-none focus:border-indigo-500 cursor-pointer"
+              className="bg-slate-800/80 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1 outline-none focus:border-indigo-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <option value="pending">Pending</option>
               <option value="in-progress">In Progress</option>
@@ -168,8 +195,13 @@ const TaskCard = ({
           {onLogCall && task.status !== "completed" && (
             <button
               onClick={() => onLogCall(task)}
-              title="Log Call"
-              className="p-1.5 rounded-lg text-indigo-400 hover:text-white hover:bg-indigo-500/20 transition-colors"
+              disabled={lockedByOther}
+              title={lockedByOther ? `Locked by ${lock.userName}` : "Log Call"}
+              className={`p-1.5 rounded-lg transition-colors ${
+                lockedByOther
+                  ? "text-slate-600 cursor-not-allowed opacity-40"
+                  : "text-indigo-400 hover:text-white hover:bg-indigo-500/20"
+              }`}
             >
               <PhoneCall className="w-3.5 h-3.5" />
             </button>

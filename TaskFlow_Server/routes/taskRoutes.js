@@ -15,8 +15,18 @@ const authenticate = require("../middleware/authMiddleware"); // Import authenti
 const authorize = require("../middleware/authorize");
 const { getTaskActivity } = require("../controllers/activityController");
 const { callAssist } = require("../controllers/knowledgeController");
+const { getActiveLocks } = require("../services/socketManager");
 
 const router = express.Router(); // Create an Express router instance
+
+/**
+ * @route   GET /api/tasks/locks/active
+ * @desc    Fetch active lead collision locks
+ * @access  Private
+ */
+router.get("/locks/active", authenticate, (req, res) => {
+  res.json({ locks: getActiveLocks() });
+});
 
 /**
  * @route   GET /api/tasks
